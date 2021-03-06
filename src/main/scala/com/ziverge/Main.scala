@@ -1,76 +1,32 @@
 package com.ziverge
 
-import java.time.Instant
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
-
+import scala.collection.mutable.{ Map => MutMap }
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.util.Success
 import scala.util.Try
 
 import akka.actor.ActorSystem
-import akka.http.scaladsl.Http
-import akka.http.scaladsl.server.Directives._
-import akka.http.scaladsl.server.Route
 import akka.stream.scaladsl._
 import akka.util.ByteString
-import upickle.default._
+import upickle.default.read
 
-import collection.mutable.{ Map => MutMap }
+import Util._
+import entities._
 
 private object Main extends App {
 
-  def format(timestamp: Long): String = {
-    val formatter = DateTimeFormatter
-      .ofPattern("yyyy-MM-dd HH:mm:ss")
-      .withZone(ZoneOffset.UTC)
-
-    formatter.format(Instant.ofEpochMilli(timestamp * 1000))
-  }
-  final case class WorldCount(event_type: String, world_count: Int)
-  object WorldCount {
-    implicit val rw: ReadWriter[WorldCount] = macroRW
-  }
-
-  final case class Event(event_type: String, data: String, timestamp: Long)
-  object Event {
-    implicit val rw: ReadWriter[Event] = macroRW
-  }
-
-  final case class EventPresentation(event_type: String, data: String, timestamp: String)
-  object EventPresentation {
-    implicit val rw: ReadWriter[EventPresentation] = macroRW
-  }
-
-  final case class Window(events: List[Event], startTime: Long, endTime: Long)
-  object Window {
-    implicit val rw: ReadWriter[Window] = macroRW
-  }
-
-  final case class WindowPresentation(
-      events: List[EventPresentation],
-      startDate: String,
-      endDate: String
-    )
-  object WindowPresentation {
-    implicit val rw: ReadWriter[WindowPresentation] = macroRW
-  }
-
   implicit val system: ActorSystem = ActorSystem("word-count")
 
-  val proc = os
-    .proc("/bin/sh", "-c", "./blackbox")
-    .spawn()
-
-  var windowHistory: List[Window] = Nil
-
-  StreamConverters
-    .fromInputStream { () => proc.stdout }                        // create stream source from process stdout
+  Blackbox
+    .start()                                                      // create stream source from process stdout
     .via(Framing.delimiter(ByteString("\n"), Int.MaxValue, true)) // split by new line
     .map(_.utf8String)
     .map(_.trim)
     .map { str => Try(read[Event](str)) } // try to parse json
     .collect { case Success(event) => event } // filter out invalid events
+    .wireTap { x => // log received event
+      Log.success(s"Received event: $x")
+    }
     .statefulMapConcat(() => { // windowing
       val windowWidth    = 5  // seconds
       val waterMarkDelay = 10 // seconds
@@ -110,61 +66,13 @@ private object Main extends App {
       }
     })
     .runWith(Sink.foreach { window =>
-      windowHistory = window :: windowHistory
+      Repository.addWindow(window)
     })
 
-  val route: Route = get {
-    pathPrefix("word-count") {
-      concat(
-        path("current") {
-
-          val worldCounts = windowHistory
-            .flatMap(_.events)
-            .foldLeft(Map.empty[String, Int]) { (acc, curr) =>
-              val currCount = Some(curr.data.split(" ").size)
-              acc.updatedWith(curr.event_type) {
-                case None    => currCount
-                case Some(v) => currCount.map(_ + v)
-              }
-            }
-            .map { x =>
-              val (eventType, wordCount) = x
-              WorldCount(eventType, wordCount)
-            }
-
-          complete(write(worldCounts))
-        },
-        path("history") {
-
-          val history = windowHistory.reverse.map { win =>
-            WindowPresentation(
-              win
-                .events
-                .map(x =>
-                  EventPresentation(
-                    x.event_type,
-                    x.data,
-                    format(x.timestamp)
-                  )
-                ),
-              format(win.startTime),
-              format(win.endTime)
-            )
-          }
-
-          complete {
-            write(history)
-          }
-        }
-      )
-    }
-  }
-
-  val binding = Http().newServerAt("localhost", 8080).bind(route)
+  val binding = HttpServer.start("localhost", 8080)
   io.StdIn.readLine("Press Enter to terminate the server\n")
   binding.flatMap(_.unbind()).onComplete { _ =>
-    proc.destroy()
-    proc.destroyForcibly()
+    Blackbox.stop()
     system.terminate()
   }
 
