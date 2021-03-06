@@ -18,7 +18,8 @@ object Dependencies {
   object Core {
     object com {
       object lihaoyi {
-        val `os-lib` = "com.lihaoyi" %% "os-lib" % "0.7.1"
+        val `os-lib` = "com.lihaoyi" %% "os-lib"  % "0.7.1"
+        val upickle  = "com.lihaoyi" %% "upickle" % "0.9.5"
       }
     }
   }
