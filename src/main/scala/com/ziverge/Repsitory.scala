@@ -11,4 +11,8 @@ object Repository {
 
   def getAllWindows: List[Window] = windowHistory
 
+  def truncate(): Unit = {
+    windowHistory = Nil
+  }
+
 }
